@@ -1,0 +1,6 @@
+﻿pred_len	seed	best_epoch	best_val_mse	test_mse	test_mae	trend_weight	periodic_weight	ramp_weight	trend_dominant	periodic_dominant	ramp_dominant	status
+24	2025	2	0.199	0.444	0.564	0.316	0.352	0.332	0.272	0.320	0.408	ok
+96	2025	2	0.198	1.300	0.930	0.103	0.242	0.655	0.001	0.220	0.779	ok
+192	2025	2	0.219	1.399	1.012	0.116	0.113	0.771	0.007	0.068	0.925	ok
+336	2025	1	0.280	0.857	0.788	0.165	0.381	0.454	0.000	0.206	0.794	ok
+720	2025	5	0.241	0.379	0.481	0.005	0.767	0.229	0.000	0.969	0.031	ok
