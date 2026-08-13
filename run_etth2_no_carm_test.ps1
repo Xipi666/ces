@@ -68,12 +68,14 @@ foreach ($runSeed in $Seeds) {
         "--epochs", "$Epochs",
         "--batch_size", "$BatchSize",
         "--lr", "3e-5",
+        "--stage2_lr", "1e-5",
         "--finetune_lr", "1e-5",
         "--patience", "15",
         "--min_epochs", "15",
         "--seed", "$runSeed",
         "--device", "auto",
-        "--balance_weight", "0.01"
+        "--balance_weight", "0.01",
+        "--horizon_balance_weight", "0.001"
     )
 
     $previousCuda = $env:CUDA_VISIBLE_DEVICES

@@ -582,6 +582,7 @@ def combined_loss(
     weights: Tensor,
     ramp_quantile: float,
     balance_weight: float = 0.01,
+    horizon_balance_weight: float = 0.001,
 ) -> Tensor:
     base = F.smooth_l1_loss(prediction, target)
     if prediction.shape[1] > 1:
@@ -595,7 +596,15 @@ def combined_loss(
         ramp = prediction.new_zeros(())
     usage = weights.mean(dim=(0, 1))
     balance = ((usage - 1.0 / 3.0) ** 2).sum()
-    return base + 0.2 * slope + 0.3 * ramp + balance_weight * balance
+    horizon_usage = weights.mean(dim=0)
+    horizon_balance = ((horizon_usage - 1.0 / 3.0) ** 2).sum(dim=-1).mean()
+    return (
+        base
+        + 0.2 * slope
+        + 0.3 * ramp
+        + balance_weight * balance
+        + horizon_balance_weight * horizon_balance
+    )
 
 
 def train_one_epoch(
@@ -605,6 +614,7 @@ def train_one_epoch(
     device: str,
     ramp_quantile: float,
     balance_weight: float,
+    horizon_balance_weight: float,
     fusion: str = "gate",
 ) -> float:
     model.train()
@@ -630,6 +640,7 @@ def train_one_epoch(
             weights,
             ramp_quantile=ramp_quantile,
             balance_weight=balance_weight,
+            horizon_balance_weight=horizon_balance_weight,
         )
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -758,6 +769,8 @@ def main() -> None:
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--k", type=int, default=2, help="Reserved for the optional sparse router.")
     parser.add_argument("--balance_weight", type=float, default=0.01)
+    parser.add_argument("--horizon_balance_weight", type=float, default=0.001)
+    parser.add_argument("--stage2_lr", type=float, default=1e-5)
     parser.add_argument(
         "--stage1_epochs", type=int, default=30,
         help="Expert pretraining epochs (default: 30).",
@@ -787,6 +800,7 @@ def main() -> None:
         args.epochs, args.batch_size, args.patience, args.min_epochs,
         args.stage1_epochs, args.stage2_epochs,
         args.stage2_patience, args.stage3_patience,
+        args.horizon_balance_weight, args.stage2_lr,
     ) < 1:
         parser.error("training, stage, patience and batch arguments must be positive")
     if args.min_epochs > args.epochs:
@@ -828,11 +842,12 @@ def main() -> None:
     print(
         f"staged_training=expert_pretrain:{stage1_epochs} "
         f"gate_frozen_experts:{stage2_epochs} joint_finetune:{stage3_epochs} "
-        f"finetune_lr={stage3_lr:.2e}"
+        f"stage2_lr={args.stage2_lr:.2e} finetune_lr={stage3_lr:.2e} "
+        f"horizon_balance_weight={args.horizon_balance_weight:.3f}"
     )
     stages = [
         ("expert_pretrain", stage1_epochs, args.lr, "uniform", True),
-        ("gate_frozen_experts", stage2_epochs, args.lr, "gate", False),
+        ("gate_frozen_experts", stage2_epochs, args.stage2_lr, "gate", False),
         ("joint_finetune", stage3_epochs, stage3_lr, "gate", True),
     ]
     global_epoch = 0
@@ -859,7 +874,8 @@ def main() -> None:
             global_epoch += 1
             loss = train_one_epoch(
                 model, loaders["train"], optimizer, device,
-                data.ramp_threshold, args.balance_weight, fusion=fusion,
+                data.ramp_threshold, args.balance_weight,
+                args.horizon_balance_weight, fusion=fusion,
             )
             val = evaluate(model, loaders["val"], device, data.scaler, data.target_idx)
             scheduler.step(val["mse"])
