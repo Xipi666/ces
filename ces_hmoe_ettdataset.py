@@ -605,6 +605,7 @@ def train_one_epoch(
     device: str,
     ramp_quantile: float,
     balance_weight: float,
+    fusion: str = "gate",
 ) -> float:
     model.train()
     total = 0.0
@@ -616,10 +617,17 @@ def train_one_epoch(
         y = batch["y"].to(device, non_blocking=non_blocking).float()
         state = batch["state"].to(device, non_blocking=non_blocking).float()
         output = model(x, future, state)
+        if fusion == "uniform":
+            uniform_weights = torch.full_like(output["weights"], 1.0 / 3.0)
+            prediction = (uniform_weights * output["experts"]).sum(dim=-1)
+            weights = uniform_weights
+        else:
+            prediction = output["prediction"]
+            weights = output["weights"]
         loss = combined_loss(
-            output["prediction"],
+            prediction,
             y,
-            output["weights"],
+            weights,
             ramp_quantile=ramp_quantile,
             balance_weight=balance_weight,
         )
@@ -750,6 +758,18 @@ def main() -> None:
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--k", type=int, default=2, help="Reserved for the optional sparse router.")
     parser.add_argument("--balance_weight", type=float, default=0.01)
+    parser.add_argument(
+        "--stage1_epochs", type=int, default=None,
+        help="Expert pretraining epochs; defaults to 20%% of --epochs.",
+    )
+    parser.add_argument(
+        "--stage2_epochs", type=int, default=None,
+        help="Frozen-expert gate training epochs; defaults to 20%% of --epochs.",
+    )
+    parser.add_argument(
+        "--finetune_lr", type=float, default=None,
+        help="Stage-3 joint fine-tuning learning rate; defaults to lr/10.",
+    )
     parser.add_argument("--smoke-test", action="store_true")
     args = parser.parse_args()
     if args.smoke_test:
@@ -759,6 +779,13 @@ def main() -> None:
         parser.error("--epochs, --batch_size, --patience and --min_epochs must be positive")
     if args.min_epochs > args.epochs:
         parser.error("--min_epochs cannot be greater than --epochs")
+    stage1_epochs = args.stage1_epochs if args.stage1_epochs is not None else max(1, args.epochs // 5)
+    stage2_epochs = args.stage2_epochs if args.stage2_epochs is not None else max(1, args.epochs // 5)
+    stage3_epochs = args.epochs - stage1_epochs - stage2_epochs
+    if stage1_epochs < 1 or stage2_epochs < 1 or stage3_epochs < 1:
+        parser.error("stage1_epochs + stage2_epochs must be less than epochs")
+    if args.finetune_lr is not None and args.finetune_lr <= 0:
+        parser.error("--finetune_lr must be positive")
     set_seed(args.seed)
     csv_path = Path(args.csv) if args.csv else resolve_csv(args.data_dir, args.dataset)
     config = ETTConfig(
@@ -780,37 +807,71 @@ def main() -> None:
         parser.error("--device cuda requested but CUDA is not available")
     device = "cuda" if args.device == "cuda" or (args.device == "auto" and torch.cuda.is_available()) else "cpu"
     model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=3,
-        threshold=1e-4, min_lr=1e-6
-    )
+    stage3_lr = args.finetune_lr if args.finetune_lr is not None else args.lr / 10.0
     best_val = float("inf")
     best_epoch = 0
     best_state = None
     stale = 0
     print(f"dataset={args.dataset} csv={csv_path} seq_len={config.seq_len} pred_len={config.pred_len} device={device} seed={args.seed}")
-    for epoch in range(1, args.epochs + 1):
-        loss = train_one_epoch(
-            model, loaders["train"], optimizer, device, data.ramp_threshold, args.balance_weight
+    print(
+        f"staged_training=expert_pretrain:{stage1_epochs} "
+        f"gate_frozen_experts:{stage2_epochs} joint_finetune:{stage3_epochs} "
+        f"finetune_lr={stage3_lr:.2e}"
+    )
+    stages = [
+        ("expert_pretrain", stage1_epochs, args.lr, "uniform", True),
+        ("gate_frozen_experts", stage2_epochs, args.lr, "gate", False),
+        ("joint_finetune", stage3_epochs, stage3_lr, "gate", True),
+    ]
+    global_epoch = 0
+    for stage_name, stage_epochs, stage_lr, fusion, train_experts in stages:
+        for parameter in model.trend.parameters():
+            parameter.requires_grad = train_experts
+        for parameter in model.periodic.parameters():
+            parameter.requires_grad = train_experts
+        for parameter in model.ramp.parameters():
+            parameter.requires_grad = train_experts
+        optimizer = torch.optim.AdamW(
+            [parameter for parameter in model.parameters() if parameter.requires_grad],
+            lr=stage_lr,
+            weight_decay=1e-4,
         )
-        val = evaluate(model, loaders["val"], device, data.scaler, data.target_idx)
-        scheduler.step(val["mse"])
-        current_lr = optimizer.param_groups[0]["lr"]
-        print(
-            f"epoch={epoch} lr={current_lr:.6g} train_loss={loss:.3f} "
-            f"val={rounded_metrics(val)}"
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=3,
+            threshold=1e-4, min_lr=1e-6
         )
-        if val["mse"] < best_val:
-            best_val = val["mse"]
-            best_epoch = epoch
-            best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+        print(f"stage={stage_name} epochs={stage_epochs} lr={stage_lr:.2e}")
+        if stage_name == "joint_finetune":
             stale = 0
-        else:
-            stale += 1
-            if epoch >= args.min_epochs and stale >= args.patience:
-                print(f"Early stopping at epoch {epoch}")
+        for stage_epoch in range(1, stage_epochs + 1):
+            global_epoch += 1
+            loss = train_one_epoch(
+                model, loaders["train"], optimizer, device,
+                data.ramp_threshold, args.balance_weight, fusion=fusion,
+            )
+            val = evaluate(model, loaders["val"], device, data.scaler, data.target_idx)
+            scheduler.step(val["mse"])
+            current_lr = optimizer.param_groups[0]["lr"]
+            print(
+                f"stage={stage_name} epoch={global_epoch} lr={current_lr:.6g} "
+                f"train_loss={loss:.3f} val={rounded_metrics(val)}"
+            )
+            # Stage 1 trains an equal-weight ensemble while the gate is still
+            # untrained, so its gate-based validation score is not comparable.
+            if stage_name != "expert_pretrain" and val["mse"] < best_val:
+                best_val = val["mse"]
+                best_epoch = global_epoch
+                best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+                stale = 0
+            else:
+                stale += 1
+            if stage_name == "joint_finetune" and global_epoch >= args.min_epochs and stale >= args.patience:
+                print(f"Early stopping at epoch {global_epoch}")
                 break
+        if stage_name == "joint_finetune" and global_epoch >= args.min_epochs and stale >= args.patience:
+            break
+    for parameter in model.parameters():
+        parameter.requires_grad = True
     if best_state is not None:
         model.load_state_dict(best_state)
         model.to(device)
