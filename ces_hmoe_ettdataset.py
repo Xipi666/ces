@@ -751,7 +751,7 @@ def main() -> None:
     parser.add_argument("--pred_len", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=3e-5)
     parser.add_argument("--patience", type=int, default=15)
     parser.add_argument("--min_epochs", type=int, default=15)
     parser.add_argument("--seed", type=int, default=2024)
@@ -760,11 +760,11 @@ def main() -> None:
     parser.add_argument("--balance_weight", type=float, default=0.01)
     parser.add_argument(
         "--stage1_epochs", type=int, default=None,
-        help="Expert pretraining epochs; defaults to 20%% of --epochs.",
+        help="Expert pretraining epochs; defaults to 30%% of --epochs.",
     )
     parser.add_argument(
         "--stage2_epochs", type=int, default=None,
-        help="Frozen-expert gate training epochs; defaults to 20%% of --epochs.",
+        help="Frozen-expert gate training epochs; defaults to 30%% of --epochs.",
     )
     parser.add_argument(
         "--finetune_lr", type=float, default=None,
@@ -779,8 +779,8 @@ def main() -> None:
         parser.error("--epochs, --batch_size, --patience and --min_epochs must be positive")
     if args.min_epochs > args.epochs:
         parser.error("--min_epochs cannot be greater than --epochs")
-    stage1_epochs = args.stage1_epochs if args.stage1_epochs is not None else max(1, args.epochs // 5)
-    stage2_epochs = args.stage2_epochs if args.stage2_epochs is not None else max(1, args.epochs // 5)
+    stage1_epochs = args.stage1_epochs if args.stage1_epochs is not None else max(1, args.epochs * 3 // 10)
+    stage2_epochs = args.stage2_epochs if args.stage2_epochs is not None else max(1, args.epochs * 3 // 10)
     stage3_epochs = args.epochs - stage1_epochs - stage2_epochs
     if stage1_epochs < 1 or stage2_epochs < 1 or stage3_epochs < 1:
         parser.error("stage1_epochs + stage2_epochs must be less than epochs")

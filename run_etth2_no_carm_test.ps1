@@ -6,7 +6,7 @@ param(
     [int]$GpuId = 0,
     [int]$Epochs = 100,
     [int]$BatchSize = 32,
-    [int]$Seed = 2024
+    [int[]]$Seeds = @(2024, 2025, 2026)
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,12 +33,10 @@ if (-not (Test-Path -LiteralPath $DataDir -PathType Container)) {
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-$summaryPath = Join-Path $LogDir ("{0}.tsv" -f $Seed)
-Set-Content -LiteralPath $summaryPath -Encoding UTF8 -Value @(
-    "pred_len`tseed`tbest_epoch`tbest_val_mse`ttest_mse`ttest_mae`ttrend_weight`tperiodic_weight`tramp_weight`ttrend_dominant`tperiodic_dominant`tramp_dominant`tstatus"
-)
 
 $predLens = @(24, 96, 192, 336, 720)
+$total = $Seeds.Count * $predLens.Count
+$count = 0
 $failCount = 0
 
 function Get-LastRegexValue {
@@ -50,12 +48,16 @@ function Get-LastRegexValue {
     return $match.Groups[$Group].Value
 }
 
-foreach ($index in 0..($predLens.Count - 1)) {
-    $predLen = $predLens[$index]
-    # Keep one seed across prediction lengths for a controlled comparison.
-    $runSeed = $Seed
-    $logPath = Join-Path $LogDir ("ETTh2_pl{0}_no_carm.log" -f $predLen)
-    Write-Host "[$($index + 1)/$($predLens.Count)] ETTh2 | seq_len=96 | pred_len=$predLen | mode=BASE | seed=$runSeed"
+foreach ($runSeed in $Seeds) {
+    $summaryPath = Join-Path $LogDir ("{0}.tsv" -f $runSeed)
+    Set-Content -LiteralPath $summaryPath -Encoding UTF8 -Value @(
+        "pred_len`tseed`tbest_epoch`tbest_val_mse`ttest_mse`ttest_mae`ttrend_weight`tperiodic_weight`tramp_weight`ttrend_dominant`tperiodic_dominant`tramp_dominant`tstatus"
+    )
+
+    foreach ($predLen in $predLens) {
+    $count++
+    $logPath = Join-Path $LogDir ("ETTh2_seed{0}_pl{1}_no_carm.log" -f $runSeed, $predLen)
+    Write-Host "[$count/$total] ETTh2 | seq_len=96 | pred_len=$predLen | mode=BASE | seed=$runSeed"
 
     $argumentList = @(
         "-u", $mainScript,
@@ -65,7 +67,8 @@ foreach ($index in 0..($predLens.Count - 1)) {
         "--pred_len", "$predLen",
         "--epochs", "$Epochs",
         "--batch_size", "$BatchSize",
-        "--lr", "1e-4",
+        "--lr", "3e-5",
+        "--finetune_lr", "1e-5",
         "--patience", "15",
         "--min_epochs", "15",
         "--seed", "$runSeed",
@@ -105,10 +108,11 @@ foreach ($index in 0..($predLens.Count - 1)) {
         Add-Content -LiteralPath $summaryPath -Encoding UTF8 -Value "$predLen`t$runSeed`t-`t-`t-`t-`t-`t-`t-`t-`t-`t-`tfailed:$exitCode"
         Write-Warning "  FAILED (exit=$exitCode) | log=$logPath"
     }
+    }
 }
 
 Write-Host ""
 Write-Host "Summary:"
 Get-Content -LiteralPath $summaryPath | ForEach-Object { Write-Host $_ }
-Write-Host ("Finished: {0}/{1} succeeded; {2} failed" -f ($predLens.Count - $failCount), $predLens.Count, $failCount)
+Write-Host ("Finished: {0}/{1} succeeded; {2} failed" -f ($total - $failCount), $total, $failCount)
 if ($failCount -gt 0) { exit 1 }
