@@ -759,12 +759,20 @@ def main() -> None:
     parser.add_argument("--k", type=int, default=2, help="Reserved for the optional sparse router.")
     parser.add_argument("--balance_weight", type=float, default=0.01)
     parser.add_argument(
-        "--stage1_epochs", type=int, default=None,
-        help="Expert pretraining epochs; defaults to 30%% of --epochs.",
+        "--stage1_epochs", type=int, default=30,
+        help="Expert pretraining epochs (default: 30).",
     )
     parser.add_argument(
-        "--stage2_epochs", type=int, default=None,
-        help="Frozen-expert gate training epochs; defaults to 30%% of --epochs.",
+        "--stage2_epochs", type=int, default=30,
+        help="Maximum frozen-expert gate training epochs (default: 30).",
+    )
+    parser.add_argument(
+        "--stage2_patience", type=int, default=5,
+        help="Stage-2 gate early-stopping patience (default: 5).",
+    )
+    parser.add_argument(
+        "--stage3_patience", type=int, default=10,
+        help="Stage-3 joint fine-tuning patience (default: 10).",
     )
     parser.add_argument(
         "--finetune_lr", type=float, default=None,
@@ -775,12 +783,16 @@ def main() -> None:
     if args.smoke_test:
         smoke_test()
         return
-    if args.epochs < 1 or args.batch_size < 1 or args.patience < 1 or args.min_epochs < 1:
-        parser.error("--epochs, --batch_size, --patience and --min_epochs must be positive")
+    if min(
+        args.epochs, args.batch_size, args.patience, args.min_epochs,
+        args.stage1_epochs, args.stage2_epochs,
+        args.stage2_patience, args.stage3_patience,
+    ) < 1:
+        parser.error("training, stage, patience and batch arguments must be positive")
     if args.min_epochs > args.epochs:
         parser.error("--min_epochs cannot be greater than --epochs")
-    stage1_epochs = args.stage1_epochs if args.stage1_epochs is not None else max(1, args.epochs * 3 // 10)
-    stage2_epochs = args.stage2_epochs if args.stage2_epochs is not None else max(1, args.epochs * 3 // 10)
+    stage1_epochs = args.stage1_epochs
+    stage2_epochs = args.stage2_epochs
     stage3_epochs = args.epochs - stage1_epochs - stage2_epochs
     if stage1_epochs < 1 or stage2_epochs < 1 or stage3_epochs < 1:
         parser.error("stage1_epochs + stage2_epochs must be less than epochs")
@@ -811,7 +823,7 @@ def main() -> None:
     best_val = float("inf")
     best_epoch = 0
     best_state = None
-    stale = 0
+    stage2_best_state = None
     print(f"dataset={args.dataset} csv={csv_path} seq_len={config.seq_len} pred_len={config.pred_len} device={device} seed={args.seed}")
     print(
         f"staged_training=expert_pretrain:{stage1_epochs} "
@@ -841,8 +853,8 @@ def main() -> None:
             threshold=1e-4, min_lr=1e-6
         )
         print(f"stage={stage_name} epochs={stage_epochs} lr={stage_lr:.2e}")
-        if stage_name == "joint_finetune":
-            stale = 0
+        stage_best_val = float("inf")
+        stage_stale = 0
         for stage_epoch in range(1, stage_epochs + 1):
             global_epoch += 1
             loss = train_one_epoch(
@@ -858,17 +870,30 @@ def main() -> None:
             )
             # Stage 1 trains an equal-weight ensemble while the gate is still
             # untrained, so its gate-based validation score is not comparable.
-            if stage_name != "expert_pretrain" and val["mse"] < best_val:
-                best_val = val["mse"]
-                best_epoch = global_epoch
-                best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
-                stale = 0
+            if stage_name != "expert_pretrain" and val["mse"] < stage_best_val:
+                stage_best_val = val["mse"]
+                stage_stale = 0
+                state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+                if stage_name == "gate_frozen_experts":
+                    stage2_best_state = state
+                if val["mse"] < best_val:
+                    best_val = val["mse"]
+                    best_epoch = global_epoch
+                    best_state = state
             else:
-                stale += 1
-            if stage_name == "joint_finetune" and global_epoch >= args.min_epochs and stale >= args.patience:
-                print(f"Early stopping at epoch {global_epoch}")
+                stage_stale += 1
+            patience = args.stage2_patience if stage_name == "gate_frozen_experts" else args.stage3_patience
+            if stage_name == "gate_frozen_experts" and stage_stale >= patience:
+                print(f"Stage-2 early stopping at epoch {global_epoch} (best_epoch={global_epoch - stage_stale})")
                 break
-        if stage_name == "joint_finetune" and global_epoch >= args.min_epochs and stale >= args.patience:
+            if stage_name == "joint_finetune" and global_epoch >= args.min_epochs and stage_stale >= patience:
+                print(f"Stage-3 early stopping at epoch {global_epoch}")
+                break
+        if stage_name == "gate_frozen_experts" and stage2_best_state is not None:
+            model.load_state_dict(stage2_best_state)
+            model.to(device)
+            print(f"Restored stage-2 best gate state: val_mse={stage_best_val:.3f}")
+        if stage_name == "joint_finetune" and global_epoch >= args.min_epochs and stage_stale >= patience:
             break
     for parameter in model.parameters():
         parameter.requires_grad = True
