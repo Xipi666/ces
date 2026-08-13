@@ -800,9 +800,12 @@ def main() -> None:
         args.epochs, args.batch_size, args.patience, args.min_epochs,
         args.stage1_epochs, args.stage2_epochs,
         args.stage2_patience, args.stage3_patience,
-        args.horizon_balance_weight, args.stage2_lr,
     ) < 1:
         parser.error("training, stage, patience and batch arguments must be positive")
+    if args.horizon_balance_weight < 0:
+        parser.error("--horizon_balance_weight must be non-negative")
+    if args.stage2_lr <= 0:
+        parser.error("--stage2_lr must be positive")
     if args.min_epochs > args.epochs:
         parser.error("--min_epochs cannot be greater than --epochs")
     stage1_epochs = args.stage1_epochs
