@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 数据集缓存与模型权重
+dataset/.ett_cache/
+*.npz
+*.npy
+*.pt
+*.pth
+*.ckpt
+checkpoints/
+
+# 运行产物
+runs/
+outputs/
+*.tmp
+
+# 大文件与参考文献
+*.pdf
+
+# 编辑器与系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 凭据（永远不要提交）
+.env
+.env.*
+.github-credentials
+*.pem
+*.key
