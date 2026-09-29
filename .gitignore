@@ -36,3 +36,6 @@ Thumbs.db
 .github-credentials
 *.pem
 *.key
+
+# 复现运行器临时锁
+_repro/.matrix_lock/
